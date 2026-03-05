@@ -26,6 +26,10 @@ from utils.registry import Registry
 from utils.visualization import get_segmentation_colors, visualize_point_cloud
 
 from autoware_ml.segmentation3d.datasets.utils import class_mapping_to_names
+from autoware_ml.segmentation3d.evaluation import (
+    SegEvaluationReport,
+    confusion_matrix_np,
+)
 
 from .defaults import create_ddp_model
 
@@ -231,10 +235,11 @@ class SemSegTester(TesterBase):
             intersection, union, target = intersection_and_union(
                 pred, segment, self.cfg.data.num_classes, self.cfg.data.ignore_index
             )
+            cm_sample = confusion_matrix_np(pred, segment, self.cfg.data.num_classes, self.cfg.data.ignore_index)
             intersection_meter.update(intersection)
             union_meter.update(union)
             target_meter.update(target)
-            record[data_name] = dict(intersection=intersection, union=union, target=target)
+            record[data_name] = dict(intersection=intersection, union=union, target=target, cm=cm_sample)
 
             mask = union != 0
             iou_class = intersection / (union + 1e-10)
@@ -249,7 +254,7 @@ class SemSegTester(TesterBase):
                 "Test: {} [{}/{}]-{} "
                 "Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) "
                 "Accuracy {acc:.4f} ({m_acc:.4f}) "
-                "mIoU {iou:.4f} ({m_iou:.4f})".format(
+                "iou_class {iou:.4f} ({m_iou:.4f})".format(
                     data_name,
                     idx + 1,
                     len(self.test_loader),
@@ -275,6 +280,7 @@ class SemSegTester(TesterBase):
             intersection = np.sum([meters["intersection"] for _, meters in record.items()], axis=0)
             union = np.sum([meters["union"] for _, meters in record.items()], axis=0)
             target = np.sum([meters["target"] for _, meters in record.items()], axis=0)
+            cm = np.sum([meters["cm"] for _, meters in record.items()], axis=0)
 
             if self.cfg.data.test.type == "S3DISDataset":
                 torch.save(
@@ -282,30 +288,23 @@ class SemSegTester(TesterBase):
                     os.path.join(save_path, f"{self.test_loader.dataset.split}.pth"),
                 )
 
-            iou_class = intersection / (union + 1e-10)
-            accuracy_class = intersection / (target + 1e-10)
-            mIoU = np.mean(iou_class)
-            mAcc = np.mean(accuracy_class)
-            allAcc = sum(intersection) / (sum(target) + 1e-10)
-
-            logger.info("Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}".format(mIoU, mAcc, allAcc))
+            num_classes = self.cfg.data.num_classes
+            ignore_index = self.cfg.data.ignore_index
             mapped_class_names = class_mapping_to_names(
                 self.cfg.class_mapping,
-                self.cfg.data.ignore_index,
+                ignore_index,
             )
-            assert len(mapped_class_names) == self.cfg.data.num_classes, (
-                "class_mapping_to_names length must match num_classes: "
-                f"{len(mapped_class_names)} vs {self.cfg.data.num_classes}"
+            assert len(mapped_class_names) == num_classes, (
+                "class_mapping_to_names length must match num_classes: " f"{len(mapped_class_names)} vs {num_classes}"
             )
-            for i in range(self.cfg.data.num_classes):
-                logger.info(
-                    "Class_{idx} - {name} Result: iou/accuracy {iou:.4f}/{accuracy:.4f}".format(
-                        idx=i,
-                        name=mapped_class_names[i],
-                        iou=iou_class[i],
-                        accuracy=accuracy_class[i],
-                    )
-                )
+            report = SegEvaluationReport.from_counts(
+                intersection,
+                union,
+                target,
+                num_classes,
+                cm,
+            )
+            report.log(logger, mapped_class_names, label="Val")
             logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
 
     @staticmethod

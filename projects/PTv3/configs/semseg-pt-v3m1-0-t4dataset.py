@@ -15,6 +15,11 @@ grid_size = 0.1  # original is 0.05
 
 point_cloud_range = [-102.4, -102.4, -2.8, 102.4, 102.4, 10.0]
 
+# evaluation: range-based (BEV radius) metrics
+metric_options = dict(
+    distance_ranges=[(0, 20), (20, 40), (40, 60), (60, 80), (80, 102.4)],
+)
+
 # dataset settings
 dataset_type = "T4Dataset"
 data_root = "data/t4dataset"
