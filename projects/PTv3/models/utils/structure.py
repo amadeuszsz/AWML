@@ -4,11 +4,32 @@ from addict import Dict
 from models.utils import batch2offset, offset2batch
 from models.utils.serialization import decode, encode
 
+# ---------------------------------------------------------------------------
+# TensorRT-safe integer power-of-two helpers
+# ---------------------------------------------------------------------------
+# TensorRT does not support the ``Pow`` op with integer data-types, and ONNX
+# does not support bitwise-shift for all backends.  We therefore replace all
+# ``2 ** n`` / ``1 << n`` computations on dynamic integer tensors with a
+# constant look-up table.  In the exported ONNX graph this becomes a simple
+# ``Gather`` node, which is universally supported.
+#
+# Range is [0, 62] because 2^63 overflows signed int64.
+_POW2_LUT = torch.tensor([2**i for i in range(63)], dtype=torch.int64)
+
+
+def pow2(n: torch.Tensor) -> torch.Tensor:
+    """Return ``2 ** n`` for a non-negative integer tensor *n* (max 62)."""
+    return _POW2_LUT.to(n.device)[n]
+
 
 def bit_length_tensor(x: torch.Tensor) -> torch.Tensor:
-    # Ensure x is a positive integer tensor
+    """Tensor-friendly ``int.bit_length()``.
+
+    Uses ``log2`` (cast to float first, as TensorRT rejects ``Log`` on
+    INT64) to compute the number of bits needed to represent *x*.
+    """
     x = torch.clamp(x, min=1)
-    return torch.floor(torch.log2(x)).to(torch.int64) + 1
+    return torch.floor(torch.log2(x.float())).to(torch.int64) + 1
 
 
 class Point(Dict):
@@ -39,12 +60,8 @@ class Point(Dict):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # If one of "offset" or "batch" do not exist, generate by the existing one
-        # If neither of them exist, initialize as batch size is 1
-        if "offset" not in self.keys() and "batch" not in self.keys():
-            self["offset"] = torch.tensor([self["coord"].size(0)], device=self["coord"].device, dtype=torch.int64)
+        if "batch" not in self.keys() and "offset" in self.keys():
             self["batch"] = offset2batch(self.offset)
-        elif "batch" not in self.keys() and "offset" in self.keys():
-            self["batch"] = offset2batch(self.offset, self["grid_coord"])
         elif "offset" not in self.keys() and "batch" in self.keys():
             self["offset"] = batch2offset(self.batch)
 
@@ -54,6 +71,7 @@ class Point(Dict):
 
         relay on ["grid_coord" or "coord" + "grid_size", "batch", "feat"]
         """
+        self["order"] = order
         assert "batch" in self.keys()
         if "grid_coord" not in self.keys():
             # if you don't want to operate GridSampling in data augmentation,

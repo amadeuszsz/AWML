@@ -21,7 +21,15 @@ def encode(grid_coord, batch=None, depth=16, order="z"):
         raise NotImplementedError
     if batch is not None:
         batch = batch.long()
-        code = batch << depth * 3 | code
+        if isinstance(depth, torch.Tensor):
+            # Dynamic depth (inside traced graph): use pow2 LUT to avoid
+            # the ONNX Pow op on INT64, which TensorRT rejects.
+            from models.utils.structure import pow2
+
+            code = batch * pow2(depth * 3) + code
+        else:
+            # Static depth (pre-computation): plain Python int
+            code = batch * (2 ** (depth * 3)) + code
     return code
 
 

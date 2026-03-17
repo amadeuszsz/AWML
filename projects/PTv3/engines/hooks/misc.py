@@ -213,6 +213,28 @@ class CheckpointLoader(HookBase):
                 if comm.get_world_size() == 1:
                     key = key[7:]  # module.xxx.xxx -> xxx.xxx
                 weight[key] = value
+
+            # Hotfix: Mark checkpoint weights as spconv v2 format.
+            # mmdet3d's register_all_modules() monkey-patches
+            # SparseModule._load_from_state_dict with a hook that transposes
+            # conv kernel weights from spconv v1 to v2 format when metadata
+            # version != 2. Checkpoints saved outside mmdet3d (e.g. Pointcept /
+            # Concerto) are already in v2 format but lack this metadata, causing
+            # an incorrect double-transpose and shape mismatch errors.
+            # Setting version=2 for every module prefix tells the hook to skip
+            # the transpose. For non-spconv modules the field is simply ignored.
+            # Note: defaultdict won't work here because PyTorch uses .get()
+            # which does not trigger the default factory.
+            metadata = {}
+            for key in weight.keys():
+                parts = key.split(".")
+                for i in range(len(parts)):
+                    prefix = ".".join(parts[: i + 1])
+                    if prefix not in metadata:
+                        metadata[prefix] = {"version": 2}
+            metadata[""] = {"version": 2}  # root module
+            weight._metadata = metadata
+
             load_state_info = self.trainer.model.load_state_dict(weight, strict=self.strict)
             self.trainer.logger.info(f"Missing keys: {load_state_info[0]}")
             if self.trainer.cfg.resume:

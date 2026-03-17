@@ -43,6 +43,12 @@ class T4Dataset(DefaultDataset):
         coord = points[:, :3]
         strength = points[:, 3].reshape([-1, 1]) / 255  # scale strength to [0, 1]
 
+        # Zero-pad color and normal to match Concerto's 9-channel input format
+        # (coord(3) + color(3) + normal(3)). Outdoor LiDAR has no per-point RGB
+        # or normals, so we use zeros — same as Pointcept's NuScenesColorNormalDataset.
+        color = np.zeros_like(coord)  # placeholder (3ch)
+        normal = np.zeros_like(coord)  # placeholder (3ch)
+
         lidarseg_path = os.path.join(self.data_root, data["pts_semantic_mask_path"])
         lidarseg_categories = data["pts_semantic_mask_categories"]
         segment = load_and_map_semantic_mask(
@@ -56,6 +62,8 @@ class T4Dataset(DefaultDataset):
         data_dict = dict(
             coord=coord,
             strength=strength,
+            color=color,
+            normal=normal,
             segment=segment,
             name=self.get_data_name(idx),
         )

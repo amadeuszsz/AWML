@@ -66,33 +66,64 @@ def xyz2key(
     b: Optional[Union[torch.Tensor, int]] = None,
     depth: int = 16,
 ):
-    r"""Encodes :attr:`x`, :attr:`y`, :attr:`z` coordinates to the shuffled keys
-    based on pre-computed look up tables. The speed of this function is much
-    faster than the method based on for-loop.
+    r"""Encode :attr:`x`, :attr:`y`, :attr:`z` to z-order (Morton) keys.
+
+    Two code-paths exist:
+
+    * **Static depth** (``int``) — used during pre-computation outside the
+      traced graph.  The original LUT-based algorithm is kept; all ``2**``
+      values are Python int constants that become ONNX ``Constant`` nodes.
+
+    * **Dynamic depth** (``torch.Tensor``) — used inside the traced graph
+      when ``GridPooling`` calls ``serialization()`` on pooled points whose
+      depth is data-dependent.  Bitwise ops (``|``, ``<<``) are replaced by
+      arithmetic equivalents (``+``, ``*``) and ``pow2()`` LUT to satisfy
+      ONNX / TensorRT constraints.  The LUT bit-patterns are non-overlapping,
+      so ``+`` ≡ ``|`` for non-negative integers.
 
     Args:
-      x (torch.Tensor): The x coordinate.
-      y (torch.Tensor): The y coordinate.
-      z (torch.Tensor): The z coordinate.
-      b (torch.Tensor or int): The batch index of the coordinates, and should be
-          smaller than 32768. If :attr:`b` is :obj:`torch.Tensor`, the size of
-          :attr:`b` must be the same as :attr:`x`, :attr:`y`, and :attr:`z`.
-      depth (int): The depth of the shuffled key, and must be smaller than 17 (< 17).
+      x, y, z (torch.Tensor): Coordinates.
+      b (torch.Tensor or int, optional): Batch index (< 32768).
+      depth (int or torch.Tensor): Serialization depth (< 17).
     """
 
     EX, EY, EZ = _key_lut.encode_lut(x.device)
     x, y, z = x.long(), y.long(), z.long()
 
+    if isinstance(depth, torch.Tensor):
+        # Dynamic depth — all intermediate values are tensors.
+        from models.utils.structure import pow2
+
+        # Always take the depth > 8 branch (depth is at least ~10 for
+        # any reasonable point cloud range / grid size).
+        key = EX[x % 256] + EY[y % 256] + EZ[z % 256]
+        mask_hi = pow2(depth - 8) - 1
+        key16 = (
+            EX[torch.div(x, 256, rounding_mode="trunc") % (mask_hi + 1)]
+            + EY[torch.div(y, 256, rounding_mode="trunc") % (mask_hi + 1)]
+            + EZ[torch.div(z, 256, rounding_mode="trunc") % (mask_hi + 1)]
+        )
+        key = key16 * (2**24) + key
+        if b is not None:
+            b = b.long() if isinstance(b, torch.Tensor) else torch.tensor(b, dtype=torch.long, device=x.device)
+            key = b * (2**48) + key
+        return key
+
+    # ---- Static (int) depth — original algorithm ----
     mask = 255 if depth > 8 else (1 << depth) - 1
-    key = EX[x & mask] | EY[y & mask] | EZ[z & mask]
+    key = EX[x % (mask + 1)] + EY[y % (mask + 1)] + EZ[z % (mask + 1)]
     if depth > 8:
         mask = (1 << (depth - 8)) - 1
-        key16 = EX[(x >> 8) & mask] | EY[(y >> 8) & mask] | EZ[(z >> 8) & mask]
-        key = key16 << 24 | key
+        key16 = (
+            EX[torch.div(x, 256, rounding_mode="trunc") % (mask + 1)]
+            + EY[torch.div(y, 256, rounding_mode="trunc") % (mask + 1)]
+            + EZ[torch.div(z, 256, rounding_mode="trunc") % (mask + 1)]
+        )
+        key = key16 * (2**24) + key
 
     if b is not None:
-        b = b.long()
-        key = b << 48 | key
+        b = b.long() if isinstance(b, torch.Tensor) else torch.tensor(b, dtype=torch.long, device=x.device)
+        key = b * (2**48) + key
 
     return key
 
